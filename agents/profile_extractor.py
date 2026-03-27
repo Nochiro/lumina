@@ -52,10 +52,11 @@ def extract_profiles(chapter_data: dict, client: Groq) -> list:
 
     profiles: List[Dict[str, Any]] = []
     for character_name, lines in grouped.items():
+        joined_lines = "\n".join(lines)
         user_content = (
             f"CHARACTER NAME: {character_name}\n\n"
             "DIALOGUE LINES:\n"
-            f"{'\\n'.join(lines)}\n"
+            f"{joined_lines}\n"
         )
 
         completion = client.chat.completions.create(
