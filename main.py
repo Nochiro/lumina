@@ -276,6 +276,9 @@ def _flagged_from_scores(scores: Dict[str, Any]) -> bool:
         if isinstance(v, (int, float)):
             return v < 7
         if isinstance(v, dict):
+            # If an agent was skipped, its scores should not affect flagged status.
+            if v.get("skipped") is True:
+                return False
             return any(walk(x) for x in v.values())
         if isinstance(v, list):
             return any(walk(x) for x in v)
@@ -315,7 +318,7 @@ def process_chapter(chapter_data: Dict[str, Any], client: Groq) -> list[Dict[str
         if not character_name or not original_japanese:
             continue
 
-        skip_continuity = character_name in (
+        skip_agents = character_name in (
             "NARRATION",
             "TEACHER",
             "STUDENT",
@@ -324,6 +327,14 @@ def process_chapter(chapter_data: Dict[str, Any], client: Groq) -> list[Dict[str
             "NARRATOR",
             "CAPTION",
             "SOUND_EFFECT",
+        )
+
+        skip_cultural = character_name in (
+            "NARRATION",
+            "TITLE_CARD",
+            "SFX",
+            "NARRATOR",
+            "CAPTION",
         )
 
         bubble_char_limit = panel.get("bubble_char_limit")
@@ -338,7 +349,8 @@ def process_chapter(chapter_data: Dict[str, Any], client: Groq) -> list[Dict[str
                 "panel_id": panel_id,
                 "character_name": character_name,
                 "original_japanese": original_japanese,
-                "skip_continuity": skip_continuity,
+                "skip_agents": skip_agents,
+                "skip_cultural": skip_cultural,
                 "bubble_type": bubble_type,
                 "bubble_char_limit": bubble_char_limit,
             }
@@ -533,42 +545,87 @@ def process_chapter(chapter_data: Dict[str, Any], client: Groq) -> list[Dict[str
         panel_id = job["panel_id"]
         character_name = job["character_name"]
         original_japanese = job["original_japanese"]
-        skip_continuity = job["skip_continuity"]
+        skip_agents = job["skip_agents"]
+        skip_cultural = job["skip_cultural"]
         bubble_type = job["bubble_type"]
         bubble_char_limit = job["bubble_char_limit"]
 
         translated_output = translated_outputs[i]
         translation_scores = translation_scores_by_panel[i]
 
-        character_profile = query_character_profile_dict(
-            character_name,
-            manga_id=manga_id,
-        ) or {
-            "name": character_name,
-            "role": "character",
-            "speech_style": "",
-            "forbidden_phrases": [],
-            "speech_rules": [],
-        }
-        character_profile["manga_id"] = manga_id
+        if skip_cultural:
+            # For narration/title/sfx-like panels we skip cultural entirely and
+            # skip continuity as usual (these panels are not tracked characters).
+            cultural_output = translated_output
+            cultural_scores = {
+                "cultural_accuracy": 10,
+                "tone_preservation": 10,
+                "naturalness": 10,
+                "pass": True,
+                "skipped": True,
+            }
+            continuity_output = cultural_output
+            continuity_scores = {
+                "voice_consistency": 10,
+                "forbidden_phrase_compliance": 10,
+                "meaning_preservation": 10,
+                "pass": True,
+                "skipped": True,
+            }
 
-        pipeline_result = run_pipeline(
-            raw_text=translated_output,
-            character_name=character_name,
-            bubble_type=bubble_type,
-            client=client,
-            bubble_char_limit=bubble_char_limit,
-            character_profile=character_profile,
-            skip_continuity=skip_continuity,
-        )
+            typesetting_result = _run_with_retries(
+                "Agent 3 (Typesetting Editor)",
+                run_fn=lambda: run_typesetting_editor(
+                    continuity_output,
+                    bubble_type,
+                    client,
+                    bubble_char_limit=bubble_char_limit,
+                ),
+                grade_fn=lambda final_text: grade_typesetting_output(
+                    original=continuity_output,
+                    final=final_text,
+                    bubble_type=bubble_type,
+                    client=client,
+                    bubble_char_limit=bubble_char_limit,
+                ),
+            )
+            final_output = typesetting_result["output"]
+            scores = {
+                "translation": translation_scores,
+                "cultural": cultural_scores,
+                "continuity": continuity_scores,
+                "typesetting": typesetting_result["scores"],
+            }
+        else:
+            character_profile = query_character_profile_dict(
+                character_name,
+                manga_id=manga_id,
+            ) or {
+                "name": character_name,
+                "role": "character",
+                "speech_style": "",
+                "forbidden_phrases": [],
+                "speech_rules": [],
+            }
+            character_profile["manga_id"] = manga_id
 
-        final_output = pipeline_result.get("final_output", "")
-        scores = {
-            "translation": translation_scores,
-            "cultural": pipeline_result.get("cultural_scores"),
-            "continuity": pipeline_result.get("continuity_scores"),
-            "typesetting": pipeline_result.get("typesetting_scores"),
-        }
+            pipeline_result = run_pipeline(
+                raw_text=translated_output,
+                character_name=character_name,
+                bubble_type=bubble_type,
+                client=client,
+                bubble_char_limit=bubble_char_limit,
+                character_profile=character_profile,
+                skip_continuity=skip_agents,
+            )
+
+            final_output = pipeline_result.get("final_output", "")
+            scores = {
+                "translation": translation_scores,
+                "cultural": pipeline_result.get("cultural_scores"),
+                "continuity": pipeline_result.get("continuity_scores"),
+                "typesetting": pipeline_result.get("typesetting_scores"),
+            }
         flagged = _flagged_from_scores(scores)
 
         add_approved_line(
