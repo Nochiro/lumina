@@ -66,99 +66,46 @@ def detect_language(text: str) -> str:
     return "unknown"
 
 
-def translate_chapter_batch(panels: list, client: Groq) -> dict:
+def translate_page(page_panels: list, client: Groq) -> dict:
     """
-    Translate all panel Japanese lines in one LLM call.
+    Translate one page worth of panel lines in a single LLM call.
 
     Args:
-        panels: List of panel dicts from a chapter JSON. Each panel should include:
-                 - panel_id (or id/index)
-                 - character (speaker name)
-                 - text (Japanese dialogue)
+        page_panels: List of panel dicts for a single page.
         client: Initialized Groq client.
 
     Returns:
-        Dict mapping panel_id (as string) -> translated English text.
+        Dict mapping panel_id -> translated text.
     """
-    items: list[tuple[str, str, str, str]] = []
-    for idx, panel in enumerate(panels):
+    items: list[tuple[str, str, str]] = []
+    page_label = "Unknown"
+    for idx, panel in enumerate(page_panels):
         if not isinstance(panel, dict):
             continue
-
         panel_id = panel.get("panel_id") or panel.get("id") or panel.get("index")
         panel_id_str = str(panel_id if panel_id is not None else idx)
-
-        character = str(panel.get("character") or "").strip()
-        if not character:
-            character = "UNKNOWN"
-
+        if page_label == "Unknown" and "-" in panel_id_str:
+            page_label = panel_id_str.split("-", 1)[0]
+        character = str(panel.get("character") or "UNKNOWN").strip() or "UNKNOWN"
         text = str(panel.get("text") or "").strip()
         if not text:
             continue
-
-        # Try to read page info from the panel dict.
-        page_val = None
-        try:
-            page_val = panel.get("page")
-        except Exception:
-            page_val = None
-        if page_val is None:
-            try:
-                page_val = panel.get("page_number")
-            except Exception:
-                page_val = None
-        if page_val is None:
-            try:
-                page_val = panel.get("page_id")
-            except Exception:
-                page_val = None
-
-        if page_val is None:
-            page_key = "1"
-        else:
-            page_key = str(page_val)
-
-        items.append((panel_id_str, character, text, page_key))
+        items.append((panel_id_str, character, text))
 
     if not items:
         return {}
 
     system_prompt = (
         "You are a professional manga translator specializing in Japanese to English.\n"
-        "You will be given multiple Japanese dialogue lines for the same chapter.\n\n"
-        "Rules (IMPORTANT):\n"
-        "1) Read ALL lines first to understand full scene context and conversation flow.\n"
-        "2) Then translate each line individually.\n"
-        "3) Preserve speaker identity. Each line is labeled with panel_id and the character.\n"
-        "4) Output ONLY a single strict JSON object.\n"
-        "5) JSON keys MUST exactly match the panel_id strings from the input.\n"
-        "6) JSON values MUST be the translated English dialogue for that panel.\n"
+        "Translate each line independently and return strict JSON only.\n"
+        "Preserve emotional state and who is speaking to whom.\n"
+        "JSON keys must be panel_id strings and values must be translated English lines.\n"
     )
 
-    panel_page_groups: dict[str, list[tuple[str, str, str]]] = {}
-    page_order: list[str] = []
-
-    for panel_id_str, character, text, page_key in items:
-        if page_key not in panel_page_groups:
-            panel_page_groups[page_key] = []
-            page_order.append(page_key)
-        panel_page_groups[page_key].append((panel_id_str, character, text))
-
-    preamble = (
-        "You are translating a manga chapter.\n"
-        "Read ALL lines below first to understand the full scene and character relationships\n"
-        "before translating any line.\n"
-        "Each line shows: [panel_id] CHARACTER: japanese_text\n"
-        "Translate preserving emotional state and who is speaking TO whom.\n"
-    )
-
-    user_content_lines: list[str] = [preamble.rstrip()]
-    for page_key in page_order:
-        user_content_lines.append(f"--- Page {page_key} ---")
-        for panel_id_str, character, text in panel_page_groups[page_key]:
-            user_content_lines.append(f"[{panel_id_str}] {character}: {text}")
-
-    user_content = "\n".join(user_content_lines).strip()
+    user_lines = [f"Page {page_label} — translate each line independently:"]
+    for panel_id_str, character, text in items:
+        user_lines.append(f"[{panel_id_str}] {character}: {text}")
+    user_content = "\n".join(user_lines)
 
     completion = client.chat.completions.create(
         model=MODEL_NAME,
@@ -170,12 +117,9 @@ def translate_chapter_batch(panels: list, client: Groq) -> dict:
 
     raw = (completion.choices[0].message.content or "").strip()
     try:
-        import json
-
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         return {}
-
     if not isinstance(parsed, dict):
         return {}
 
@@ -187,10 +131,31 @@ def translate_chapter_batch(panels: list, client: Groq) -> dict:
     return result
 
 
+def translate_literal_metadata(text: str, client: Groq) -> str:
+    """
+    Translate Japanese metadata text literally (dates/locations/proper nouns preserved).
+    """
+    completion = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Translate this Japanese metadata text literally, preserving all dates, "
+                    "locations, and proper nouns. Output only the translated text."
+                ),
+            },
+            {"role": "user", "content": text},
+        ],
+    )
+    return (completion.choices[0].message.content or "").strip()
+
+
 def run_translation_agent(
     raw_text: str,
     client: Groq,
     character_name: str = "",
+    sliding_context: str = "",
 ) -> str:
     """
     Run the Translation Agent on a raw Japanese line.
@@ -240,6 +205,7 @@ def run_translation_agent(
             if character_name
             else ""
         )
+        + (f"{sliding_context}\n\n" if sliding_context else "")
         + "Source dialogue:\n"
         + f"{raw_text}\n"
     )

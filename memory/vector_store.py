@@ -231,6 +231,7 @@ def add_approved_line(
     original_japanese: str,
     final_output: str,
     scores: Dict[str, Any],
+    chapter: int | None = None,
     *,
     config: VectorStoreConfig = DEFAULT_CONFIG,
 ) -> None:
@@ -251,6 +252,7 @@ def add_approved_line(
                 "panel_id": str(panel_id),
                 "character_name": character_name,
                 "manga_id": manga_id,
+                "chapter": chapter,
                 "original_japanese": original_japanese,
                 "created_at": created_at,
                 "scores_json": json.dumps(scores, ensure_ascii=False),

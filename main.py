@@ -11,7 +11,8 @@ from agents.continuity_agent import (
 from agents.translation_agent import (
     detect_language,
     grade_translation_output,
-    translate_chapter_batch,
+    translate_literal_metadata,
+    translate_page,
     run_translation_agent,
 )
 from agents.typesetting_agent import (
@@ -314,7 +315,16 @@ def process_chapter(chapter_data: Dict[str, Any], client: Groq) -> list[Dict[str
         if not character_name or not original_japanese:
             continue
 
-        skip_continuity = character_name in ("NARRATION", "TEACHER", "STUDENT")
+        skip_continuity = character_name in (
+            "NARRATION",
+            "TEACHER",
+            "STUDENT",
+            "TITLE_CARD",
+            "SFX",
+            "NARRATOR",
+            "CAPTION",
+            "SOUND_EFFECT",
+        )
 
         bubble_char_limit = panel.get("bubble_char_limit")
         bubble_char_limit = (
@@ -334,28 +344,145 @@ def process_chapter(chapter_data: Dict[str, Any], client: Groq) -> list[Dict[str
             }
         )
 
-    # STEP 0 — Batch translate ALL panels first.
-    try:
-        translation_results: Dict[str, str] = translate_chapter_batch(panels, client)
-    except Exception as exc:
-        print(f"[ProcessChapter] Batch translation failed: {exc}")
-        translation_results = {}
-
+    # STEP 0 — Translate one page at a time.
     translated_outputs: list[str] = []
     translation_scores_by_panel: list[Dict[str, Any]] = []
     translated_lines_by_character: Dict[str, list[str]] = {}
 
-    fixed_batch_translation_score = {"batch_translated": True, "pass": True}
+    # Group panel jobs by page number from panel_id prefix (e.g., "1-2" -> page "1").
+    page_groups: Dict[str, list[Dict[str, Any]]] = {}
+    page_order: list[str] = []
+    for job in panel_jobs:
+        panel_id = str(job["panel_id"])
+        page_key = panel_id.split("-", 1)[0] if "-" in panel_id else "0"
+        job["page_key"] = page_key
+        if page_key not in page_groups:
+            page_groups[page_key] = []
+            page_order.append(page_key)
+        page_groups[page_key].append(job)
+
+    translated_by_panel_id: Dict[str, str] = {}
+    score_by_panel_id: Dict[str, Dict[str, Any]] = {}
+    page_translation_score_by_page: Dict[str, Dict[str, Any]] = {}
+
+    for page_key in page_order:
+        page_jobs = page_groups[page_key]
+
+        # TITLE_CARD panels are translated separately with literal metadata behavior.
+        normal_page_panels: list[Dict[str, Any]] = []
+        for job in page_jobs:
+            panel_id = job["panel_id"]
+            character_name = job["character_name"]
+            original_japanese = job["original_japanese"]
+
+            if character_name == "TITLE_CARD":
+                try:
+                    translated = translate_literal_metadata(original_japanese, client)
+                    if not translated:
+                        translated = original_japanese
+                    score = grade_translation_output(
+                        original=original_japanese,
+                        translated=translated,
+                        client=client,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[ProcessChapter] TITLE_CARD literal translation failed for panel_id='{panel_id}': {exc}"
+                    )
+                    translated = original_japanese
+                    score = {
+                        "contextual_accuracy": 0,
+                        "tone_preservation": 0,
+                        "naturalness": 0,
+                        "pass": False,
+                    }
+
+                translated_by_panel_id[panel_id] = translated
+                score_by_panel_id[panel_id] = score
+            else:
+                normal_page_panels.append(
+                    {
+                        "panel_id": panel_id,
+                        "character": character_name,
+                        "text": original_japanese,
+                    }
+                )
+
+        if normal_page_panels:
+            try:
+                page_translation_map = translate_page(normal_page_panels, client)
+            except Exception as exc:
+                print(f"[ProcessChapter] Page translation failed for page='{page_key}': {exc}")
+                page_translation_map = {}
+
+            for panel in normal_page_panels:
+                panel_id = str(panel["panel_id"])
+                original_japanese = str(panel["text"])
+                translated = page_translation_map.get(panel_id) or original_japanese
+                try:
+                    score = grade_translation_output(
+                        original=original_japanese,
+                        translated=translated,
+                        client=client,
+                    )
+                except Exception:
+                    score = {
+                        "contextual_accuracy": 0,
+                        "tone_preservation": 0,
+                        "naturalness": 0,
+                        "pass": False,
+                    }
+                translated_by_panel_id[panel_id] = translated
+                score_by_panel_id[panel_id] = score
+
+        # Real page-level translation quality signal:
+        # grade the first non-NARRATION panel on this page.
+        sample_job = next(
+            (
+                pj
+                for pj in page_jobs
+                if str(pj["character_name"]).strip() != "NARRATION"
+            ),
+            None,
+        )
+        if sample_job is not None:
+            sample_panel_id = sample_job["panel_id"]
+            sample_original = sample_job["original_japanese"]
+            sample_translated = translated_by_panel_id.get(sample_panel_id) or sample_original
+            try:
+                page_translation_score_by_page[page_key] = grade_translation_output(
+                    original=sample_original,
+                    translated=sample_translated,
+                    client=client,
+                )
+            except Exception:
+                page_translation_score_by_page[page_key] = {
+                    "contextual_accuracy": 0,
+                    "tone_preservation": 0,
+                    "naturalness": 0,
+                    "pass": False,
+                }
+        else:
+            page_translation_score_by_page[page_key] = {
+                "contextual_accuracy": 0,
+                "tone_preservation": 0,
+                "naturalness": 0,
+                "pass": False,
+            }
 
     for job in panel_jobs:
         panel_id = job["panel_id"]
         character_name = job["character_name"]
         original_japanese = job["original_japanese"]
-
-        translated_output = translation_results.get(panel_id) or original_japanese
-
+        translated_output = translated_by_panel_id.get(panel_id) or original_japanese
+        translation_scores = score_by_panel_id.get(panel_id) or {
+            "contextual_accuracy": 0,
+            "tone_preservation": 0,
+            "naturalness": 0,
+            "pass": False,
+        }
         translated_outputs.append(translated_output)
-        translation_scores_by_panel.append(fixed_batch_translation_score)
+        translation_scores_by_panel.append(translation_scores)
         translated_lines_by_character.setdefault(character_name, []).append(
             translated_output
         )
@@ -380,6 +507,23 @@ def process_chapter(chapter_data: Dict[str, Any], client: Groq) -> list[Dict[str
                 vector_store=vector_store,
                 manga_id=manga_id,
             )
+
+            # Seed continuity memory from profile sample dialogue on chapter 1 cold start.
+            sample_dialogue = profile.get("sample_dialogue") or []
+            if isinstance(sample_dialogue, list):
+                for sample_line in sample_dialogue:
+                    sample_line_str = str(sample_line).strip()
+                    if not sample_line_str:
+                        continue
+                    add_approved_line(
+                        panel_id="profile_seed",
+                        character_name=inferred_character_name,
+                        manga_id=manga_id,
+                        original_japanese="",
+                        final_output=sample_line_str,
+                        scores={"profile_seed": True, "pass": True},
+                        chapter=0,
+                    )
     except Exception as exc:
         print(f"[ProcessChapter] Profile extraction failed (continuing anyway): {exc}")
 
@@ -434,6 +578,7 @@ def process_chapter(chapter_data: Dict[str, Any], client: Groq) -> list[Dict[str
             original_japanese=original_japanese,
             final_output=final_output,
             scores=scores,
+            chapter=chapter,
         )
 
         results.append(
@@ -442,6 +587,9 @@ def process_chapter(chapter_data: Dict[str, Any], client: Groq) -> list[Dict[str
                 "original": original_japanese,
                 "final_output": final_output,
                 "scores": scores,
+                "page_translation_score": page_translation_score_by_page.get(
+                    str(job.get("page_key", "0"))
+                ),
                 "flagged": flagged,
             }
         )
