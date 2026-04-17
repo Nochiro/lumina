@@ -231,6 +231,7 @@ def add_approved_line(
     original_japanese: str,
     final_output: str,
     scores: Dict[str, Any],
+    flagged: bool = False,
     chapter: int | None = None,
     *,
     config: VectorStoreConfig = DEFAULT_CONFIG,
@@ -256,6 +257,7 @@ def add_approved_line(
                 "original_japanese": original_japanese,
                 "created_at": created_at,
                 "scores_json": json.dumps(scores, ensure_ascii=False),
+                "flagged": bool(flagged),
             }
         ],
     )
@@ -359,6 +361,72 @@ def load_characters_from_json(
         character_name = data.get("name") or json_file.stem
         add_character_profile(character_name, data, manga_id)
         print(f"[VectorStore] Loaded character profile: {character_name}")
+
+
+def delete_manga_data(
+    manga_id: str,
+    *,
+    config: VectorStoreConfig = DEFAULT_CONFIG,
+) -> None:
+    """
+    Delete all vector-store data for a manga_id across all collections.
+    """
+    character_collection = get_character_collection(config)
+    character_rows = character_collection.get()
+    character_ids = [
+        row_id
+        for row_id in (character_rows.get("ids") or [])
+        if str(row_id).startswith(f"{manga_id}::")
+    ]
+    if character_ids:
+        character_collection.delete(ids=character_ids)
+
+    approved_collection = get_approved_lines_collection(config)
+    approved_rows = approved_collection.get(where={"manga_id": {"$eq": manga_id}})
+    approved_ids = approved_rows.get("ids") or []
+    if approved_ids:
+        approved_collection.delete(ids=approved_ids)
+
+    localization_collection = get_localization_decisions_collection(config)
+    localization_rows = localization_collection.get()
+    localization_ids = [
+        row_id
+        for row_id in (localization_rows.get("ids") or [])
+        if str(row_id).startswith(f"{manga_id}::")
+    ]
+    if localization_ids:
+        localization_collection.delete(ids=localization_ids)
+
+    print(f"[VectorStore] Deleted all data for manga_id: {manga_id}")
+
+
+def delete_chapter_data(
+    manga_id: str,
+    chapter: int,
+    *,
+    config: VectorStoreConfig = DEFAULT_CONFIG,
+) -> None:
+    """
+    Delete approved lines for a single chapter within a manga project.
+    """
+    approved_collection = get_approved_lines_collection(config)
+    rows = approved_collection.get(where={"manga_id": {"$eq": manga_id}})
+
+    ids = rows.get("ids") or []
+    metadatas = rows.get("metadatas") or []
+    chapter_prefix = f"{chapter}-"
+    ids_to_delete: List[str] = []
+
+    for row_id, metadata in zip(ids, metadatas):
+        metadata = metadata or {}
+        panel_id = str(metadata.get("panel_id") or "")
+        if panel_id.startswith(chapter_prefix):
+            ids_to_delete.append(str(row_id))
+
+    if ids_to_delete:
+        approved_collection.delete(ids=ids_to_delete)
+
+    print(f"[VectorStore] Deleted chapter {chapter} data for {manga_id}")
 
 
 def test_vector_store() -> None:

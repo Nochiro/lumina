@@ -21,8 +21,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from main import process_chapter  # type: ignore
-from memory.vector_store import load_characters_from_json  # type: ignore
-from utils.project_manager import create_project, load_projects  # type: ignore
+from memory.vector_store import (  # type: ignore
+    delete_chapter_data,
+    delete_manga_data,
+    load_characters_from_json,
+)
+from utils.project_manager import (  # type: ignore
+    create_project,
+    delete_project,
+    load_projects,
+    remove_chapter,
+)
 
 
 @st.cache_resource
@@ -288,8 +297,14 @@ def main() -> None:
             label = (
                 f"{display_name} ({language}) — {chapters_count} chapters completed"
             )
-            if st.sidebar.button(label, key=f"proj_btn_{manga_id}"):
-                st.session_state["selected_project_manga_id"] = manga_id
+            proj_col, del_col = st.sidebar.columns([0.85, 0.15], gap="small")
+            with proj_col:
+                if st.button(label, key=f"proj_btn_{manga_id}"):
+                    st.session_state["selected_project_manga_id"] = manga_id
+            with del_col:
+                if st.button("🗑️", key=f"proj_delete_btn_{manga_id}", help="Delete project"):
+                    st.session_state["pending_delete_manga_id"] = manga_id
+                    st.session_state["pending_delete_name"] = display_name
 
     new_project_clicked = st.sidebar.button("New Project")
     if new_project_clicked:
@@ -320,9 +335,90 @@ def main() -> None:
                     st.rerun()
 
     selected_manga_id = st.session_state.get("selected_project_manga_id")
+
+    pending_delete_manga_id = st.session_state.get("pending_delete_manga_id")
+    if pending_delete_manga_id:
+        pending_delete_name = st.session_state.get("pending_delete_name", "")
+        st.warning(
+            "⚠️ Delete "
+            f"'{pending_delete_name}'? This will permanently wipe ALL character profiles, approved lines, and localization memory for this manga from ChromaDB. This cannot be undone."
+        )
+        confirm_col, cancel_col = st.columns(2)
+        with confirm_col:
+            if st.button("Yes, delete everything", type="primary", key="confirm_delete_project"):
+                delete_manga_data(str(pending_delete_manga_id))
+                delete_project(str(pending_delete_manga_id))
+                st.session_state.pop("pending_delete_manga_id", None)
+                st.session_state.pop("pending_delete_name", None)
+                if st.session_state.get("selected_project_manga_id") == pending_delete_manga_id:
+                    st.session_state.pop("selected_project_manga_id", None)
+                st.rerun()
+        with cancel_col:
+            if st.button("Cancel", key="cancel_delete_project"):
+                st.session_state.pop("pending_delete_manga_id", None)
+                st.session_state.pop("pending_delete_name", None)
+                st.rerun()
+
     if not selected_manga_id:
         st.info("Select a project from the sidebar to run the pipeline.")
         return
+
+    selected_project = next(
+        (
+            proj
+            for proj in projects
+            if str(proj.get("manga_id") or "").strip() == str(selected_manga_id)
+        ),
+        None,
+    )
+    chapters_completed = selected_project.get("chapters_completed") if selected_project else []
+    chapters_int = sorted(
+        {
+            int(chapter)
+            for chapter in (chapters_completed or [])
+            if str(chapter).strip().lstrip("-").isdigit()
+        }
+    )
+
+    if chapters_int:
+        st.subheader("Chapter History")
+        for chapter in chapters_int:
+            chapter_col, delete_col = st.columns([0.9, 0.1], gap="small")
+            with chapter_col:
+                st.write(f"Chapter {chapter}")
+            with delete_col:
+                if st.button(
+                    "🗑️",
+                    key=f"delete_chapter_btn_{selected_manga_id}_{chapter}",
+                    help=f"Delete chapter {chapter} memory",
+                ):
+                    st.session_state["pending_delete_chapter"] = int(chapter)
+                    st.session_state["pending_delete_chapter_manga"] = str(selected_manga_id)
+
+        pending_delete_chapter = st.session_state.get("pending_delete_chapter")
+        pending_delete_chapter_manga = st.session_state.get("pending_delete_chapter_manga")
+        if (
+            pending_delete_chapter is not None
+            and str(pending_delete_chapter_manga) == str(selected_manga_id)
+        ):
+            st.warning(
+                f"Delete Chapter {pending_delete_chapter} data? Approved lines for this chapter will be removed from memory."
+            )
+            chapter_confirm_col, chapter_cancel_col = st.columns(2)
+            with chapter_confirm_col:
+                if st.button("Yes, delete chapter", key="confirm_delete_chapter"):
+                    delete_chapter_data(str(selected_manga_id), int(pending_delete_chapter))
+                    remove_chapter(str(selected_manga_id), int(pending_delete_chapter))
+                    st.session_state.pop("pending_delete_chapter", None)
+                    st.session_state.pop("pending_delete_chapter_manga", None)
+                    st.rerun()
+            with chapter_cancel_col:
+                if st.button("Cancel", key="cancel_delete_chapter"):
+                    st.session_state.pop("pending_delete_chapter", None)
+                    st.session_state.pop("pending_delete_chapter_manga", None)
+                    st.rerun()
+
+        st.divider()
 
     try:
         _load_characters_for_manga(str(selected_manga_id))

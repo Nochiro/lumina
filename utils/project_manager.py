@@ -131,3 +131,42 @@ def mark_chapter_complete(manga_id: str, chapter_number: int) -> None:
 
     _save_projects(projects)
 
+
+def delete_project(manga_id: str) -> None:
+    """
+    Remove a project by manga_id and save projects.json.
+    """
+    manga_id_norm = _normalize_manga_id(manga_id)
+    projects = load_projects()
+    updated_projects = [
+        project
+        for project in projects
+        if str(project.get("manga_id") or "").strip().lower() != manga_id_norm
+    ]
+    _save_projects(updated_projects)
+
+
+def remove_chapter(manga_id: str, chapter: int) -> None:
+    """
+    Remove a completed chapter number from a project's chapters_completed list.
+    """
+    manga_id_norm = _normalize_manga_id(manga_id)
+    projects = load_projects()
+
+    for project in projects:
+        if str(project.get("manga_id") or "").strip().lower() != manga_id_norm:
+            continue
+
+        chapters = project.get("chapters_completed") or []
+        chapters_int: List[int] = []
+        for ch in chapters:
+            try:
+                chapters_int.append(int(ch))
+            except Exception:
+                continue
+
+        project["chapters_completed"] = [ch for ch in chapters_int if ch != int(chapter)]
+        break
+
+    _save_projects(projects)
+

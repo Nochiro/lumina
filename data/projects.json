@@ -1,12 +1,6 @@
 {
   "projects": [
     {
-      "manga_id": "test",
-      "display_name": "Test",
-      "language": "Japanese",
-      "chapters_completed": []
-    },
-    {
       "manga_id": "test_case",
       "display_name": "Test Case",
       "language": "Japanese",
@@ -49,6 +43,14 @@
     {
       "manga_id": "fbfgb",
       "display_name": "fbfgb",
+      "language": "Japanese",
+      "chapters_completed": [
+        1
+      ]
+    },
+    {
+      "manga_id": "test",
+      "display_name": "test",
       "language": "Japanese",
       "chapters_completed": [
         1
