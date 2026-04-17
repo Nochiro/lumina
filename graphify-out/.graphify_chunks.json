@@ -1,0 +1,22 @@
+[
+  [
+    "README.md",
+    "main.py",
+    "requirements.txt",
+    "agents\\__init__.py",
+    "agents\\continuity_agent.py",
+    "agents\\cultural_agent.py",
+    "agents\\profile_extractor.py",
+    "agents\\translation_agent.py",
+    "agents\\typesetting_agent.py",
+    "data\\characters\\README.md",
+    "memory\\__init__.py",
+    "memory\\vector_store.py",
+    "ui\\__init__.py",
+    "ui\\app.py",
+    "utils\\__init__.py",
+    "utils\\groq_client.py",
+    "utils\\helpers.py",
+    "utils\\project_manager.py"
+  ]
+]

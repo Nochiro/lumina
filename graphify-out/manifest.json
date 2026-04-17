@@ -1,0 +1,20 @@
+{
+  "main.py": 1776417867.3121316,
+  "agents\\continuity_agent.py": 1774520644.055197,
+  "agents\\cultural_agent.py": 1774520634.6621828,
+  "agents\\profile_extractor.py": 1774947339.862875,
+  "agents\\translation_agent.py": 1774966967.1161902,
+  "agents\\typesetting_agent.py": 1774520662.3061914,
+  "agents\\__init__.py": 1774352135.3217235,
+  "memory\\vector_store.py": 1776417867.3171327,
+  "memory\\__init__.py": 1774352135.3594542,
+  "ui\\app.py": 1776417867.3191316,
+  "ui\\__init__.py": 1774352135.3712664,
+  "utils\\groq_client.py": 1774520560.4609473,
+  "utils\\helpers.py": 1774352135.3773003,
+  "utils\\project_manager.py": 1776417867.3241327,
+  "utils\\__init__.py": 1774352135.3732753,
+  "README.md": 1774352135.3176978,
+  "requirements.txt": 1774352135.3652353,
+  "data\\characters\\README.md": 1774352135.339597
+}
