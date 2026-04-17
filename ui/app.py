@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -25,6 +26,7 @@ from memory.vector_store import (  # type: ignore
     delete_chapter_data,
     delete_manga_data,
     load_characters_from_json,
+    query_approved_lines_for_chapter,
 )
 from utils.project_manager import (  # type: ignore
     create_project,
@@ -112,6 +114,76 @@ def _load_characters_for_manga(manga_id: str) -> None:
     """
     characters_folder = PROJECT_ROOT / "data" / "characters"
     load_characters_from_json(characters_folder, manga_id=manga_id)
+
+
+def _build_panel_character_map(chapter_data: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Build panel_id -> character mapping from chapter input payload.
+    """
+    panel_id_to_character: dict[str, str] = {}
+    for panel in (chapter_data.get("panels") or []):
+        if not isinstance(panel, dict):
+            continue
+        pid = panel.get("panel_id") or panel.get("id") or panel.get("index")
+        pid_str = str(pid) if pid is not None else ""
+        character = str(panel.get("character") or "").strip()
+        if pid_str:
+            panel_id_to_character[pid_str] = character
+    return panel_id_to_character
+
+
+def _render_panel_results_table(
+    results: list[Dict[str, Any]],
+    panel_id_to_character: Dict[str, str],
+) -> None:
+    """
+    Render per-panel localization results in a compact HTML table.
+    """
+    import html
+
+    header_html = (
+        "<tr>"
+        "<th>panel_id</th>"
+        "<th>character</th>"
+        "<th>original_japanese</th>"
+        "<th>final_output</th>"
+        "<th>scores</th>"
+        "<th>flagged</th>"
+        "</tr>"
+    )
+
+    rows_html = []
+    for r in results:
+        panel_id = html.escape(str(r.get("panel_id", "")))
+        character = html.escape(panel_id_to_character.get(str(r.get("panel_id", "")), ""))
+        original = html.escape(str(r.get("original", "")))
+        final_output = html.escape(str(r.get("final_output", "")))
+        scores_json = html.escape(
+            json.dumps(r.get("scores", {}), ensure_ascii=False)
+        )
+        flagged = bool(r.get("flagged"))
+        flagged_text = "FLAGGED" if flagged else "OK"
+        bg = "#ffcc80" if flagged else "transparent"
+
+        rows_html.append(
+            "<tr style=\"background-color: %s;\">" % bg
+            + f"<td>{panel_id}</td>"
+            + f"<td>{character}</td>"
+            + f"<td><pre style=\"margin:0;white-space:pre-wrap;\">{original}</pre></td>"
+            + f"<td><pre style=\"margin:0;white-space:pre-wrap;\">{final_output}</pre></td>"
+            + f"<td><pre style=\"margin:0;white-space:pre-wrap;\">{scores_json}</pre></td>"
+            + f"<td>{flagged_text}</td>"
+            + "</tr>"
+        )
+
+    table_html = (
+        "<table style=\"width:100%; border-collapse: collapse;\">"
+        + "<thead>" + header_html + "</thead>"
+        + "<tbody>" + "".join(rows_html) + "</tbody>"
+        + "</table>"
+    )
+
+    st.markdown(table_html, unsafe_allow_html=True)
 
 
 def _results_tabs(raw_text: str, result: Dict[str, Any]) -> None:
@@ -385,7 +457,14 @@ def main() -> None:
         for chapter in chapters_int:
             chapter_col, delete_col = st.columns([0.9, 0.1], gap="small")
             with chapter_col:
-                st.write(f"Chapter {chapter}")
+                if st.button(
+                    f"Open Chapter {chapter}",
+                    key=f"open_chapter_btn_{selected_manga_id}_{chapter}",
+                    use_container_width=True,
+                ):
+                    st.session_state["selected_history_chapter"] = int(chapter)
+                    st.session_state["selected_history_chapter_manga"] = str(selected_manga_id)
+                    st.rerun()
             with delete_col:
                 if st.button(
                     "🗑️",
@@ -417,6 +496,53 @@ def main() -> None:
                     st.session_state.pop("pending_delete_chapter", None)
                     st.session_state.pop("pending_delete_chapter_manga", None)
                     st.rerun()
+
+        st.divider()
+
+    selected_history_chapter = st.session_state.get("selected_history_chapter")
+    selected_history_chapter_manga = st.session_state.get("selected_history_chapter_manga")
+    if (
+        selected_history_chapter is not None
+        and str(selected_history_chapter_manga) == str(selected_manga_id)
+    ):
+        st.subheader(f"Saved Translations - Chapter {selected_history_chapter}")
+
+        saved_rows = query_approved_lines_for_chapter(
+            manga_id=str(selected_manga_id),
+            chapter=int(selected_history_chapter),
+        )
+
+        if not saved_rows:
+            st.info("No saved translations found for this chapter.")
+        else:
+            saved_results: list[Dict[str, Any]] = []
+            saved_panel_map: dict[str, str] = {}
+            for row in saved_rows:
+                panel_id = str(row.get("panel_id") or "")
+                saved_panel_map[panel_id] = str(row.get("character_name") or "")
+                saved_results.append(
+                    {
+                        "panel_id": panel_id,
+                        "original": str(row.get("original_japanese") or ""),
+                        "final_output": str(row.get("final_output") or ""),
+                        "scores": row.get("scores") or {},
+                        "flagged": bool(row.get("flagged")),
+                    }
+                )
+
+            _render_panel_results_table(saved_results, saved_panel_map)
+            st.download_button(
+                label="Download Saved Chapter Results",
+                data=json.dumps(saved_results, ensure_ascii=False, indent=2),
+                file_name=f"chapter_{selected_history_chapter}_saved_results.json",
+                mime="application/json",
+                key=f"download_saved_chapter_{selected_history_chapter}",
+            )
+
+        if st.button("Close Saved Chapter View", key="close_saved_chapter_view"):
+            st.session_state.pop("selected_history_chapter", None)
+            st.session_state.pop("selected_history_chapter_manga", None)
+            st.rerun()
 
         st.divider()
 
@@ -456,78 +582,55 @@ def main() -> None:
                 st.error(f"Pipeline error: {exc}")
                 return
 
+        panel_id_to_character = _build_panel_character_map(chapter_data)
+        chapter_number = chapter_data.get("chapter") or chapter_data.get("chapter_number")
+        run_title = f"{uploaded_file.name}"
+        if chapter_number not in (None, ""):
+            run_title = f"Chapter {chapter_number} - {uploaded_file.name}"
+
+        history = st.session_state.setdefault("chapter_results_history", [])
+        history.insert(
+            0,
+            {
+                "run_title": run_title,
+                "run_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "results": results,
+                "panel_id_to_character": panel_id_to_character,
+            },
+        )
+
+        # Keep the latest run available under the original key for compatibility.
         st.session_state["chapter_results"] = results
 
-    if "chapter_results" in st.session_state:
-        results = st.session_state["chapter_results"]
+    if "chapter_results_history" in st.session_state and st.session_state["chapter_results_history"]:
+        history = st.session_state["chapter_results_history"]
         st.divider()
-        st.subheader("Per-Panel Results")
+        st.subheader("Translation History")
+        st.caption("Newest runs first. Expand any run to review prior chapter outputs.")
 
-        import html
+        if st.button("Clear Translation History"):
+            st.session_state.pop("chapter_results_history", None)
+            st.session_state.pop("chapter_results", None)
+            st.rerun()
 
-        # Map panel_id -> character so the results table can show character
-        # even though `process_chapter()` returns only required fields.
-        panel_id_to_character: dict[str, str] = {}
-        for panel in (chapter_data.get("panels") or []):
-            if not isinstance(panel, dict):
-                continue
-            pid = panel.get("panel_id") or panel.get("id") or panel.get("index")
-            pid_str = str(pid) if pid is not None else ""
-            character = str(panel.get("character") or "").strip()
-            if pid_str:
-                panel_id_to_character[pid_str] = character
+        for idx, item in enumerate(history):
+            run_title = str(item.get("run_title") or f"Run {idx + 1}")
+            run_at = str(item.get("run_at") or "")
+            label = f"{run_title} ({run_at})" if run_at else run_title
 
-        header_html = (
-            "<tr>"
-            "<th>panel_id</th>"
-            "<th>character</th>"
-            "<th>original_japanese</th>"
-            "<th>final_output</th>"
-            "<th>scores</th>"
-            "<th>flagged</th>"
-            "</tr>"
-        )
+            with st.expander(label, expanded=(idx == 0)):
+                item_results = item.get("results") or []
+                item_panel_map = item.get("panel_id_to_character") or {}
 
-        rows_html = []
-        for r in results:
-            panel_id = html.escape(str(r.get("panel_id", "")))
-            character = html.escape(panel_id_to_character.get(str(r.get("panel_id", "")), ""))
-            original = html.escape(str(r.get("original", "")))
-            final_output = html.escape(str(r.get("final_output", "")))
-            scores_json = html.escape(
-                json.dumps(r.get("scores", {}), ensure_ascii=False)
-            )
-            flagged = bool(r.get("flagged"))
-            flagged_text = "FLAGGED" if flagged else "OK"
-            bg = "#ffcc80" if flagged else "transparent"
+                _render_panel_results_table(item_results, item_panel_map)
 
-            rows_html.append(
-                "<tr style=\"background-color: %s;\">" % bg
-                + f"<td>{panel_id}</td>"
-                + f"<td>{character}</td>"
-                + f"<td><pre style=\"margin:0;white-space:pre-wrap;\">{original}</pre></td>"
-                + f"<td><pre style=\"margin:0;white-space:pre-wrap;\">{final_output}</pre></td>"
-                + f"<td><pre style=\"margin:0;white-space:pre-wrap;\">{scores_json}</pre></td>"
-                + f"<td>{flagged_text}</td>"
-                + "</tr>"
-            )
-
-        table_html = (
-            "<table style=\"width:100%; border-collapse: collapse;\">"
-            + "<thead>" + header_html + "</thead>"
-            + "<tbody>" + "".join(rows_html) + "</tbody>"
-            + "</table>"
-        )
-
-        st.markdown(table_html, unsafe_allow_html=True)
-
-        st.divider()
-        st.download_button(
-            label="Download Results as JSON",
-            data=json.dumps(results, ensure_ascii=False, indent=2),
-            file_name="chapter_results.json",
-            mime="application/json",
-        )
+                st.download_button(
+                    label="Download Results as JSON",
+                    data=json.dumps(item_results, ensure_ascii=False, indent=2),
+                    file_name=f"chapter_results_{idx + 1}.json",
+                    mime="application/json",
+                    key=f"download_results_{idx}",
+                )
 
 
 if __name__ == "__main__":

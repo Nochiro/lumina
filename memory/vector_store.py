@@ -304,6 +304,67 @@ def query_last_approved_lines(
     return rows[-limit:]
 
 
+def query_approved_lines_for_chapter(
+    manga_id: str,
+    chapter: int,
+    *,
+    config: VectorStoreConfig = DEFAULT_CONFIG,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve approved lines for one chapter, sorted by creation time.
+
+    This is used by the UI to show saved chapter translations even after reruns.
+    """
+    collection = get_approved_lines_collection(config)
+    result = collection.get(where={"manga_id": {"$eq": manga_id}})
+
+    documents = result.get("documents") or []
+    metadatas = result.get("metadatas") or []
+
+    chapter_num = int(chapter)
+    chapter_prefix = f"{chapter_num}-"
+    rows: List[Dict[str, Any]] = []
+
+    for doc, meta in zip(documents, metadatas):
+        meta = meta or {}
+
+        # Prefer explicit chapter metadata; keep panel_id prefix fallback for older rows.
+        row_chapter = meta.get("chapter")
+        panel_id = str(meta.get("panel_id") or "")
+
+        include_row = False
+        try:
+            include_row = int(row_chapter) == chapter_num
+        except Exception:
+            include_row = panel_id.startswith(chapter_prefix)
+
+        if not include_row:
+            continue
+
+        scores: Dict[str, Any] = {}
+        raw_scores = meta.get("scores_json")
+        if raw_scores:
+            try:
+                scores = json.loads(str(raw_scores))
+            except Exception:
+                scores = {}
+
+        rows.append(
+            {
+                "panel_id": panel_id,
+                "character_name": str(meta.get("character_name") or ""),
+                "original_japanese": str(meta.get("original_japanese") or ""),
+                "final_output": str(doc or ""),
+                "scores": scores,
+                "flagged": bool(meta.get("flagged")),
+                "created_at": int(meta.get("created_at") or 0),
+            }
+        )
+
+    rows.sort(key=lambda r: int(r.get("created_at") or 0))
+    return rows
+
+
 def upsert_localization_decision(
     manga_id: str,
     source_phrase: str,
